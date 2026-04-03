@@ -1,0 +1,15 @@
+[project]
+name = "argus"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gymnasium>=1.2.3",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "scipy>=1.17.1",
+    "shapely>=2.1.2",
+    "stable-baselines3[extra]>=2.8.0",
+    "tensorboard>=2.20.0",
+]
