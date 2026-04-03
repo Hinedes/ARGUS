@@ -140,8 +140,8 @@ def main():
     print("  Echos PPO v3 — Curriculum Training")
     print("=" * 60)
 
-    N_ENVS = 8          # Parallel environments — your Core Ultra 7 can handle this
-    TOTAL_STEPS = 3_000_000  # 3M steps; curriculum will self-pace
+    N_ENVS = 16         # Parallel environments — was 8, CPU has headroom
+    TOTAL_STEPS = 3_000_000
 
     print(f"\nSpawning {N_ENVS} parallel environments...")
     vec_env = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
@@ -156,7 +156,7 @@ def main():
         verbose=1,
         learning_rate=3e-4,
         n_steps=2048,
-        batch_size=256,
+        batch_size=512,   # Was 256 — scales with N_ENVS * n_steps rollout buffer
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,

@@ -33,8 +33,9 @@ class DynamicEchosEnv(gym.Env):
         self.sensor_mode = "THROW"
         self.command_state = "COMMAND A: SCOUT"
         self.current_step = 0
-        self.last_yaw_rate = 0.0 # Track this to punish wobbling
+        self.last_yaw_rate = 0.0
         self.rth_complete = False
+        self.min_wall_dist = 10.0  # Safe default before first scan
         
         # 1. Randomize the Maze and Survivor
         self._generate_random_maze()
@@ -58,20 +59,18 @@ class DynamicEchosEnv(gym.Env):
                 ((8, -1), (12, -1)), ((12, -1), (12, 5)), ((8, 1), (8, 5)), ((8, 5), (12, 5))
             ])
             self.survivor_pos = np.array([10.0, 4.0])
-            self.branch_center = np.array([10.0, 2.0])
         elif maze_type == "RIGHT":
             self.walls = MultiLineString(base_walls + [
                 ((8, 1), (12, 1)), ((12, 1), (12, -5)), ((8, -1), (8, -5)), ((8, -5), (12, -5))
             ])
             self.survivor_pos = np.array([10.0, -4.0])
-            self.branch_center = np.array([10.0, -2.0])
         else: # T_JUNCT
             self.walls = MultiLineString(base_walls + [
                 ((8, 1), (8, 5)), ((8, -1), (8, -5)), ((8, 5), (12, 5)), 
                 ((8, -5), (12, -5)), ((12, 5), (12, -5))
             ])
+            # Randomly place survivor in left or right branch
             self.survivor_pos = np.array([10.0, np.random.choice([4.0, -4.0])])
-            self.branch_center = np.array([10.0, np.sign(self.survivor_pos[1]) * 2.0])
 
     def step(self, action):
         self.current_step += 1
@@ -87,6 +86,7 @@ class DynamicEchosEnv(gym.Env):
         
         # 1. Take a radar reading FIRST
         self.last_scan = self._simulate_argus_scan()
+        self.min_wall_dist = float(np.min(self.last_scan))  # Cache — reused by reward + crash check
         
         # 2. Algorithms process the state
         self.path_b_snr = self._calculate_path_b_snr()
@@ -108,19 +108,15 @@ class DynamicEchosEnv(gym.Env):
             if np.linalg.norm(self.uav_pos - np.array([1.0, 0.0])) < 1.0:
                 self.rth_complete = True # Mission Accomplished
 
-        # STATE 2: Hunt (Target Acquired) — SNR > 50 means within ~1.4m
-        elif self.path_b_snr > 50.0:
+        # STATE 2: Hunt (Target Acquired)
+        elif self.path_b_snr > 150.0:
             print(f"\n[SYSTEM] Target Acquired at {self.uav_pos[0]:.2f}, {self.uav_pos[1]:.2f}. Dropping Beacon.")
             self.command_state = "COMMAND C: RTH"
             
-        # STATE 2: Hunt (Signal Detected) — two-stage approach
+        # STATE 2: Hunt (Signal Detected)
         elif self.path_b_snr > self.SNR_HUNT_THRESHOLD:
             self.command_state = "COMMAND B: HUNT"
-            dist_to_survivor = np.linalg.norm(self.uav_pos - self.survivor_pos)
-            if dist_to_survivor < 2.5:
-                self.current_waypoint = self.survivor_pos  # Close enough, go direct
-            else:
-                self.current_waypoint = self.branch_center  # Approach via safe center first
+            self.current_waypoint = self.survivor_pos 
             
         # STATE 1: Scout
         else:
@@ -138,32 +134,17 @@ class DynamicEchosEnv(gym.Env):
 
     def _commander_sensor_toggle(self):
         """Intelligent ToF Trigger: Look around if an obstacle is near any ray."""
-        minimum_clearance = np.min(self.last_scan)
+        # Check if the closest return across all 5 rays is dangerously near
+        minimum_clearance = self.min_wall_dist
         
         if minimum_clearance < 1.5:
+            # Hazard detected on the periphery. Open the beam.
             self.sensor_mode = "FLOOD"
             self.covariance = max(0.1, self.covariance - 1.5)
-            # Wall-pinned: redirect toward clearest ray so RL has somewhere to go
-            self._set_escape_waypoint()
         elif self.covariance > self.COVARIANCE_THRESHOLD:
             self.sensor_mode = "FLOOD"
         else:
             self.sensor_mode = "THROW"
-
-    def _set_escape_waypoint(self):
-        """When wall-pinned in SCOUT, set waypoint toward the longest ray."""
-        # Don't override hunt/RTH — Commander knows where it wants to go
-        if self.command_state != "COMMAND A: SCOUT":
-            return
-        angles = np.linspace(-math.radians(30), math.radians(30), 5)
-        best_idx = int(np.argmax(self.last_scan))
-        best_angle = self.uav_yaw + angles[best_idx]
-        # Target 60% of max clearance distance, capped at 3m — don't overshoot into the next wall
-        escape_dist = min(float(self.last_scan[best_idx]) * 0.6, 3.0)
-        self.current_waypoint = np.array([
-            self.uav_pos[0] + escape_dist * math.cos(best_angle),
-            self.uav_pos[1] + escape_dist * math.sin(best_angle)
-        ])
 
     def _calculate_path_b_snr(self):
         dist = float(np.linalg.norm(self.uav_pos - self.survivor_pos))
@@ -206,18 +187,15 @@ class DynamicEchosEnv(gym.Env):
         reward = (prev_dist_to_waypoint - dist_to_waypoint) * 10.0
         
         # Stick 1: Punish yawing only when moving fast AND clear of walls.
-        # Near a wall, free yaw is survival — penalizing it causes the freeze-then-crash loop.
-        min_wall_dist = Point(self.uav_pos).distance(self.walls)
-        if abs(self.last_v_forward) > 0.2 and min_wall_dist > 0.8:
+        if abs(self.last_v_forward) > 0.2 and self.min_wall_dist > 0.8:
             reward -= abs(self.last_yaw_rate) * 0.1
         
         # Stick 2: Proximity to walls
-        min_distance_to_wall = Point(self.uav_pos).distance(self.walls)
-        if min_distance_to_wall < 0.5: 
-            reward -= (0.5 - min_distance_to_wall) * 5.0
+        if self.min_wall_dist < 0.5:
+            reward -= (0.5 - self.min_wall_dist) * 5.0
             
         # Stick 3: Crash
-        if self._check_crash(): 
+        if self._check_crash():
             reward -= 100.0
             
         # Massive Bonus: Successfully completing RTH
@@ -226,7 +204,7 @@ class DynamicEchosEnv(gym.Env):
             
         return float(reward)
 
-    def _check_crash(self): return Point(self.uav_pos).distance(self.walls) <= 0.2
+    def _check_crash(self): return self.min_wall_dist <= 0.2
     def _check_target_reached(self): return self.path_b_snr > 150.0
     
     def _get_obs(self):
