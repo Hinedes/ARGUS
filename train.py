@@ -62,7 +62,7 @@ class CurriculumEchosEnv(DynamicEchosEnv):
             terminated = True
             reward += 200.0  # Reduced bonus (no RTH leg)
 
-        info["curriculum_stage"] = str(self.curriculum_stage)
+        info["curriculum_stage"] = self.curriculum_stage
         return obs, reward, terminated, truncated, info
 
 
@@ -163,6 +163,7 @@ def main():
         clip_range=0.2,
         ent_coef=0.01,      # Small entropy bonus — encourages exploration in tight spaces
         tensorboard_log="./echos_tb_logs/",
+        device="cuda",
     )
 
     print(f"\nCommencing curriculum training ({TOTAL_STEPS:,} steps)...")
