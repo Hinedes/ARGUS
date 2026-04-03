@@ -163,7 +163,7 @@ def main():
         clip_range=0.2,
         ent_coef=0.01,      # Small entropy bonus — encourages exploration in tight spaces
         tensorboard_log="./echos_tb_logs/",
-        device="cuda",
+        device="cpu",
     )
 
     print(f"\nCommencing curriculum training ({TOTAL_STEPS:,} steps)...")
