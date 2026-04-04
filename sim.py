@@ -59,11 +59,13 @@ class DynamicEchosEnv(gym.Env):
                 ((8, -1), (12, -1)), ((12, -1), (12, 5)), ((8, 1), (8, 5)), ((8, 5), (12, 5))
             ])
             self.survivor_pos = np.array([10.0, 4.0])
+            self.branch_center = np.array([10.0, 2.0])
         elif maze_type == "RIGHT":
             self.walls = MultiLineString(base_walls + [
                 ((8, 1), (12, 1)), ((12, 1), (12, -5)), ((8, -1), (8, -5)), ((8, -5), (12, -5))
             ])
             self.survivor_pos = np.array([10.0, -4.0])
+            self.branch_center = np.array([10.0, -2.0])
         else: # T_JUNCT
             self.walls = MultiLineString(base_walls + [
                 ((8, 1), (8, 5)), ((8, -1), (8, -5)), ((8, 5), (12, 5)), 
@@ -71,6 +73,7 @@ class DynamicEchosEnv(gym.Env):
             ])
             # Randomly place survivor in left or right branch
             self.survivor_pos = np.array([10.0, np.random.choice([4.0, -4.0])])
+            self.branch_center = np.array([10.0, np.sign(self.survivor_pos[1]) * 2.0])
 
     def step(self, action):
         self.current_step += 1
@@ -114,18 +117,22 @@ class DynamicEchosEnv(gym.Env):
             self.command_state = "COMMAND C: RTH"
             
         # STATE 2: Hunt (Signal Detected)
-        elif self.path_b_snr > self.SNR_HUNT_THRESHOLD:
+        elif self.path_b_snr > self.SNR_HUNT_THRESHOLD and self.uav_pos[0] > 8.0:
             self.command_state = "COMMAND B: HUNT"
-            self.current_waypoint = self.survivor_pos 
+            dist_to_survivor = np.linalg.norm(self.uav_pos - self.survivor_pos)
+            if dist_to_survivor < 2.5:
+                self.current_waypoint = self.survivor_pos
+            else:
+                self.current_waypoint = self.branch_center 
             
         # STATE 1: Scout
         else:
             self.command_state = "COMMAND A: SCOUT"
-            if np.linalg.norm(self.uav_pos - np.array([8.0, 0.0])) < 1.5:
+            if np.linalg.norm(self.uav_pos - np.array([8.0, 0.0])) < 0.6:
                 if Point(12.0, 5.0).distance(self.walls) < 0.1: 
-                    self.current_waypoint = np.array([8.0, -6.0]) # Go bottom
+                    self.current_waypoint = np.array([10.0, -3.0]) # Go bottom
                 else:
-                    self.current_waypoint = np.array([8.0, 6.0])  # Go top
+                    self.current_waypoint = np.array([10.0, 3.0])  # Go top
 
     def _update_eskf_covariance(self):
         self.covariance += 0.2
@@ -137,7 +144,7 @@ class DynamicEchosEnv(gym.Env):
         # Check if the closest return across all 5 rays is dangerously near
         minimum_clearance = self.min_wall_dist
         
-        if minimum_clearance < 1.5:
+        if minimum_clearance < 0.4:
             # Hazard detected on the periphery. Open the beam.
             self.sensor_mode = "FLOOD"
             self.covariance = max(0.1, self.covariance - 1.5)
@@ -233,7 +240,7 @@ def run_live_sim():
     
     # Try to load the newly trained v2 brain with RTH and dynamic maze capabilities
     try:
-        model = PPO.load("echos_ppo_v2")
+        model = PPO.load("echos_ppo_v3")
         print("[System] Neural weights (v2) loaded successfully.")
     except Exception as e:
         print(f"[Warning] Could not load v2 model (Error: {e}). Running uncalibrated agent.")
