@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+tmp_*
+*.npz
+*.egg-info/
+.venv/
+argus-venv/
