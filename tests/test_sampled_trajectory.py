@@ -252,11 +252,16 @@ def test_acceptance_cli_passes_valid_fixture():
     with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
         _write_fixture_npz(f.name, d)
         from argus.validate_echos_trajectory import validate
+        from argus.motion import _TOL_OMEGA_TRANSFORM, _TOL_GIMBAL_QUAT_DEG, _TOL_BEAM_AXIS_DEG, _TOL_POSITION_MM
         report = validate(f.name)
         assert report["n_samples"] == 50
-        for k in report:
-            if k.startswith("xval_"):
-                assert report[k] is None or report[k] < 1e9, f"{k}={report[k]}"
+        # transform checks must be within their declared tolerances
+        xv = report.get
+        assert xv("xval_omega_transform", 0) <= _TOL_OMEGA_TRANSFORM
+        assert xv("xval_gimbal_quat_composition_deg", 0) <= _TOL_GIMBAL_QUAT_DEG
+        assert xv("xval_beam_axis_deg", 0) <= _TOL_BEAM_AXIS_DEG
+        assert xv("xval_emitter_pos_mm", 0) <= _TOL_POSITION_MM
+        assert xv("xval_mic_pos_mm", 0) <= _TOL_POSITION_MM
     os.unlink(f.name)
 
 

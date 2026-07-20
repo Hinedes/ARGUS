@@ -9,6 +9,8 @@ boresight, so that signed vertical direction is recoverable from TDOA.
 from dataclasses import dataclass
 import numpy as np
 
+from .motion import ECHOS_MIC_OFFSETS
+
 # Emitter / gimbal origin.
 ORIGIN = np.zeros(3)
 
@@ -23,7 +25,11 @@ DIAMOND_HALF = 0.06
 
 
 def diamond_mics(tilt: float = DIAMOND_TILT, half: float = DIAMOND_HALF) -> np.ndarray:
-    """Return 4x3 mic positions for the tilted diamond."""
+    """Return 4x3 mic positions for the canonical tilted diamond.
+
+    This is the simulation geometry used for acoustic validation.  The Echos
+    physical array uses separate offsets defined in ``motion.ECHOS_MIC_OFFSETS``.
+    """
     flat = np.array([
         [ half,  half, 0.0],
         [-half,  half, 0.0],
@@ -33,6 +39,17 @@ def diamond_mics(tilt: float = DIAMOND_TILT, half: float = DIAMOND_HALF) -> np.n
     c, s = np.cos(tilt), np.sin(tilt)
     rot = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
     return flat @ rot.T
+
+
+def echos_mics() -> np.ndarray:
+    """Return 4x3 microphone positions for the Echos physical array (body frame).
+
+    Front:  +X 78.5 mm, +Z 21.5 mm
+    Rear:   -X 78.5 mm, -Z 21.5 mm
+    Left:   +Y 78.5 mm
+    Right:  -Y 78.5 mm
+    """
+    return ECHOS_MIC_OFFSETS.copy()
 
 
 @dataclass

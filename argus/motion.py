@@ -365,8 +365,21 @@ class SampledTrajectory(Trajectory):
 
     # -- Trajectory interface ------------------------------------------------
 
-    def emitter_pos(self, t: float) -> np.ndarray:
+    def body_origin(self, t: float) -> np.ndarray:
+        """World-frame position of the drone body origin."""
         return _linear_interp(t, self._t, self._pos)
+
+    def emitter_pos(self, t: float) -> np.ndarray:
+        """World-frame position of the physical emitter.
+
+        Uses the exported ``emitter_pos_world_m`` array when available
+        (Echos contract), otherwise derives from body origin + emitter
+        offset rotated by body orientation.
+        """
+        if self._emitter_pos_export is not None:
+            return _linear_interp(t, self._t, self._emitter_pos_export)
+        R = self.body_rot(t)
+        return self.body_origin(t) + R @ ECHOS_EMITTER_OFFSET
 
     def body_rot(self, t: float) -> np.ndarray:
         idx = np.clip(np.searchsorted(self._t, t) - 1, 0, len(self._t) - 2)

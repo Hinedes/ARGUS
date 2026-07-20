@@ -50,30 +50,31 @@ def main():
     print(f"Beam axis norm range:     {report.get('beam_axis_norm_range', '?')}")
     print()
 
+    _TOLERANCES = {
+        "xval_omega_transform": ("rad/s", 1e-8),
+        "xval_gimbal_quat_composition_deg": ("deg", 1.0),
+        "xval_beam_axis_deg": ("deg", 0.5),
+        "xval_emitter_pos_mm": ("mm", 1.0),
+        "xval_mic_pos_mm": ("mm", 1.0),
+    }
+
     checks = [
-        ("Transform: omega world from body",
-         "xval_omega_transform" in report,
-         report.get("xval_omega_transform", None)),
-        ("Transform: gimbal quat composition",
-         "xval_gimbal_quat_composition_deg" in report,
-         report.get("xval_gimbal_quat_composition_deg", None)),
-        ("Transform: beam axis",
-         "xval_beam_axis_deg" in report,
-         report.get("xval_beam_axis_deg", None)),
-        ("Transform: emitter position",
-         "xval_emitter_pos_mm" in report,
-         report.get("xval_emitter_pos_mm", None)),
-        ("Transform: microphone positions",
-         "xval_mic_pos_mm" in report,
-         report.get("xval_mic_pos_mm", None)),
+        ("Transform: omega world from body", "xval_omega_transform"),
+        ("Transform: gimbal quat composition", "xval_gimbal_quat_composition_deg"),
+        ("Transform: beam axis", "xval_beam_axis_deg"),
+        ("Transform: emitter position", "xval_emitter_pos_mm"),
+        ("Transform: microphone positions", "xval_mic_pos_mm"),
     ]
 
     all_pass = True
-    for name, exists, val in checks:
-        if exists:
-            ok = val is not None and val < 1e9
+    for name, key in checks:
+        val = report.get(key, None)
+        tol = _TOLERANCES.get(key, (None, 1e9))
+        unit, limit = tol
+        if val is not None:
+            ok = val <= limit
             all_pass = all_pass and ok
-            print(f"  {_pass_fail(ok):>4}  {name}: {val:.4f}")
+            print(f"  {_pass_fail(ok):>4}  {name}: {val:.4f} {unit}  (limit {limit:.4f} {unit})")
         else:
             print(f"  SKIP  {name}: arrays not available for comparison")
 
