@@ -3,6 +3,8 @@ name: ARGUS audit snapshot
 on:
   push:
     branches: ["fix/argus-audit-v2"]
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: read
