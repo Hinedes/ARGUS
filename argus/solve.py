@@ -12,6 +12,11 @@ from .acoustic_scene import ORIGIN, diamond_mics
 
 
 def tof_to_distance(tof: np.ndarray, speed: float = 343.0) -> np.ndarray:
+    tof = np.asarray(tof, dtype=float)
+    if not np.isfinite(speed) or speed <= 0:
+        raise ValueError("speed must be finite and positive")
+    if np.any(~np.isfinite(tof)) or np.any(tof < 0):
+        raise ValueError("tof must contain finite, non-negative values")
     return speed * tof
 
 
@@ -47,21 +52,44 @@ def solve_point(
     as a mirror ambiguity. This is the Throw-mode constraint the raw unconstrained
     solve would otherwise ignore.
     """
+    tof = np.asarray(tof, dtype=float)
+    if tof.ndim != 1:
+        raise ValueError(f"tof must be 1-D, got shape {tof.shape}")
     if mics is None:
         mics = diamond_mics()
+    mics = np.asarray(mics, dtype=float)
+    if mics.ndim != 2 or mics.shape[1] != 3 or len(mics) != len(tof):
+        raise ValueError("mics must have shape (len(tof), 3)")
+    if len(mics) < 3 or np.any(~np.isfinite(mics)):
+        raise ValueError("mics must contain at least three finite positions")
     if origin is None:
         origin = ORIGIN
+    origin = np.asarray(origin, dtype=float)
+    if origin.shape != (3,) or np.any(~np.isfinite(origin)):
+        raise ValueError("origin must be a finite 3-vector")
     if beam_axis is None:
         beam_axis = np.array([0.0, 0.0, 1.0])
-    beam_axis = beam_axis / np.linalg.norm(beam_axis)
+    beam_axis = np.asarray(beam_axis, dtype=float)
+    beam_norm = np.linalg.norm(beam_axis)
+    if beam_axis.shape != (3,) or not np.isfinite(beam_norm) or beam_norm == 0:
+        raise ValueError("beam_axis must be a finite, non-zero 3-vector")
+    beam_axis = beam_axis / beam_norm
+    if not np.isfinite(cone_halfangle) or not 0 <= cone_halfangle <= np.pi:
+        raise ValueError("cone_halfangle must be finite and in [0, pi]")
 
     d = tof_to_distance(tof, speed)
     R = np.median(d) / 2.0  # coarse range from median absolute ToF
 
     # start points: on the beam axis, plus small lateral offsets
     starts = [origin + beam_axis * R]
+    lateral_ref = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(lateral_ref, beam_axis)) > 0.9:
+        lateral_ref = np.array([0.0, 1.0, 0.0])
+    lateral_x = lateral_ref - beam_axis * np.dot(lateral_ref, beam_axis)
+    lateral_x /= np.linalg.norm(lateral_x)
+    lateral_y = np.cross(beam_axis, lateral_x)
     for s in [(0.1, 0.1), (-0.1, 0.1), (0.1, -0.1), (-0.1, -0.1)]:
-        lateral = np.array([s[0], s[1], 0.0])
+        lateral = s[0] * lateral_x + s[1] * lateral_y
         starts.append(origin + beam_axis * R + lateral)
 
     best = None
@@ -73,7 +101,14 @@ def solve_point(
             res, J = _residual(P, mics, origin, d)
             cost = float(res @ res)
             A = J.T @ J + lam * np.eye(3)
-            step = np.linalg.solve(A, J.T @ -res)
+            try:
+                step = np.linalg.solve(A, J.T @ -res)
+            except np.linalg.LinAlgError:
+                lam = min(lam * 10.0, 1e12)
+                continue
+            if np.any(~np.isfinite(step)):
+                lam = min(lam * 10.0, 1e12)
+                continue
             Pn = P + step
             resn, _ = _residual(Pn, mics, origin, d)
             if resn @ resn < cost:
@@ -85,6 +120,8 @@ def solve_point(
                 lam = min(lam * 2.0, 1e6)
         res, _ = _residual(P, mics, origin, d)
         cost = float(res @ res)
+        if not np.all(np.isfinite(P)) or not np.isfinite(cost):
+            continue
         # reject mirror solutions outside the known forward beam cone
         if np.dot(P - origin, beam_axis) <= 0:
             continue
@@ -97,6 +134,5 @@ def solve_point(
             best_cost = cost
             best = P
     if best is None:
-        # fall back to the lowest-cost start if all were outside the cone
-        best = starts[0]
+        raise RuntimeError("no valid reflector solution in the beam cone")
     return best

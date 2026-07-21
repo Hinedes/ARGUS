@@ -8,15 +8,30 @@ Exit code 0 on pass, 1 on any contract violation.
 """
 
 import sys
-import json
 import numpy as np
-from .motion import SampledTrajectory, _REQUIRED_KEYS_STRICT
+from .motion import (
+    SampledTrajectory, _TOL_OMEGA_TRANSFORM, _TOL_GIMBAL_QUAT_DEG,
+    _TOL_BEAM_AXIS_DEG, _TOL_POSITION_MM,
+)
 
 
 def validate(path: str) -> dict:
-    data = dict(np.load(path))
+    with np.load(path) as loaded:
+        data = dict(loaded)
     traj = SampledTrajectory(data, strict_contract=True)
     report = traj.contract_report()
+    limits = {
+        "xval_omega_transform": _TOL_OMEGA_TRANSFORM,
+        "xval_gimbal_quat_composition_deg": _TOL_GIMBAL_QUAT_DEG,
+        "xval_beam_axis_deg": _TOL_BEAM_AXIS_DEG,
+        "xval_emitter_pos_mm": _TOL_POSITION_MM,
+        "xval_mic_pos_mm": _TOL_POSITION_MM,
+    }
+    failures = [f"{key}={report[key]:.6g} > {limit}"
+                for key, limit in limits.items()
+                if key in report and report[key] is not None and report[key] > limit]
+    if failures:
+        raise ValueError("transform tolerance failure: " + "; ".join(failures))
     return report
 
 

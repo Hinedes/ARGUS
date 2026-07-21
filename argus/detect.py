@@ -14,11 +14,42 @@ import numpy as np
 from .schedule import Schedule
 
 
+def _validate_waveforms(waveforms: np.ndarray) -> np.ndarray:
+    waveforms = np.asarray(waveforms, dtype=float)
+    if waveforms.ndim != 2 or waveforms.shape[0] == 0 or waveforms.shape[1] == 0:
+        raise ValueError("waveforms must have shape (n_mics, n_samples)")
+    if np.any(~np.isfinite(waveforms)):
+        raise ValueError("waveforms contain non-finite values")
+    return waveforms
+
+
+def _validate_segments(segments, sample_rate: float):
+    if not np.isfinite(sample_rate) or sample_rate <= 0:
+        raise ValueError("sample_rate must be finite and positive")
+    if not segments:
+        raise ValueError("segments must not be empty")
+    for seg in segments:
+        if (not all(np.isfinite(float(v)) for v in
+                    (seg.freq, seg.start, seg.duration)) or
+                seg.freq <= 0 or seg.start < 0 or seg.duration <= 0):
+            raise ValueError("segments contain invalid frequency, start, or duration")
+    freqs = np.array([seg.freq for seg in segments], dtype=float)
+    if len(np.unique(freqs)) != len(freqs):
+        raise ValueError("segment frequencies must be unique")
+
+
 def _matched_env(sig: np.ndarray, freq: float, sr: float, tone: float) -> np.ndarray:
     """Carrier-coherent matched filter: correlate the channel with a short tone
     burst template of length `tone` seconds at `freq`. The correlation peaks at
     the burst onset in the channel. Returned as magnitude (frequency-selective,
     so overlapping Method-C bursts at nearby tones stay separated)."""
+    sig = np.asarray(sig, dtype=float)
+    if sig.ndim != 1 or sig.size == 0 or np.any(~np.isfinite(sig)):
+        raise ValueError("signal must be a finite, non-empty 1-D array")
+    if not np.isfinite(freq) or freq <= 0 or not np.isfinite(sr) or sr <= 0:
+        raise ValueError("frequency and sample rate must be finite and positive")
+    if not np.isfinite(tone) or tone <= 0:
+        raise ValueError("tone duration must be finite and positive")
     nref = max(1, int(tone * sr))
     t = np.arange(nref) / sr
     ref = np.exp(1j * 2.0 * np.pi * freq * t)
@@ -43,6 +74,7 @@ def arrival_times(
     schedule: Schedule,
     speed: float = 343.0,
     range_window: float = 20.0,
+    fractional: bool = False,
 ) -> np.ndarray:
     """Return arrival times (seconds) for each mic/segment, relative to emission.
 
@@ -54,6 +86,8 @@ def arrival_times(
     unambiguous and degrades gracefully under noise (peak survives mild
     broadband noise).
     """
+    waveforms = _validate_waveforms(waveforms)
+    _validate_segments(schedule.segments, schedule.sample_rate)
     n_mics = waveforms.shape[0]
     arrivals = np.zeros((n_mics, len(schedule.segments)))
     sr = schedule.sample_rate
@@ -67,8 +101,15 @@ def arrival_times(
             # a stronger later burst cannot be mistaken for this one
             lo = i0 + nref - 1
             hi = min(len(corr), i0 + int(max_rt * sr) + nref - 1)
+            if lo < 0 or hi <= lo:
+                raise ValueError(f"segment {j} has no samples in its detection window")
             pk = lo + int(np.argmax(corr[lo:hi]))
             onset_idx = pk - (nref - 1)
+            if fractional and 0 < pk < len(corr) - 1:
+                ym, y0, yp = corr[pk - 1], corr[pk], corr[pk + 1]
+                denom = ym - 2.0 * y0 + yp
+                if denom != 0 and np.isfinite(denom):
+                    onset_idx += float(np.clip(0.5 * (ym - yp) / denom, -0.5, 0.5))
             arrivals[i, j] = onset_idx / sr - seg.start
     return arrivals
 
@@ -114,15 +155,29 @@ def phase_tdoa(
     and `valid[i]` is True when the per-tone phases fit the linear model well
     (coherence held). When coherence is destroyed the delays are rejected.
     """
+    waveforms = _validate_waveforms(waveforms)
+    _validate_segments(segments, sample_rate)
     sr = float(sample_rate)
     n_mics = waveforms.shape[0]
     n_seg = len(segments)
+    if n_seg < 2:
+        raise ValueError("at least two segments are required for phase TDOA")
+    if (not isinstance(reference_mic, (int, np.integer)) or
+            reference_mic < 0 or reference_mic >= n_mics):
+        raise ValueError("reference_mic is outside the waveform array")
     freqs = np.array([seg.freq for seg in segments], dtype=float)
     starts = np.array([seg.start for seg in segments], dtype=float)
     durs = np.array([seg.duration for seg in segments], dtype=float)
     tau_c = np.asarray(coarse_tof_per_mic, dtype=float)
+    if tau_c.shape != (n_mics,) or np.any(~np.isfinite(tau_c)) or np.any(tau_c < 0):
+        raise ValueError("coarse_tof_per_mic must be finite, non-negative, and one per mic")
+    if phase_correction is not None:
+        phase_correction = np.asarray(phase_correction, dtype=float)
+        if phase_correction.shape != (n_mics, n_seg) or np.any(~np.isfinite(phase_correction)):
+            raise ValueError("phase_correction must have shape (n_mics, n_segments)")
 
     phi = np.zeros((n_mics, n_seg))
+    coeff_valid = np.ones((n_mics, n_seg), dtype=bool)
     for i in range(n_mics):
         for k in range(n_seg):
             f = freqs[k]
@@ -131,13 +186,17 @@ def phase_tdoa(
             a = int((s + tau_c[i]) * sr)
             b = a + int(d * sr)
             if b > waveforms.shape[1]:
+                coeff_valid[i, k] = False
                 b = waveforms.shape[1]
             if b <= a:
-                phi[i, k] = 0.0
+                coeff_valid[i, k] = False
                 continue
             tm = (a + np.arange(b - a)) / sr
             tc = s + tau_c[i] + d / 2.0
             z = np.sum(waveforms[i, a:b] * np.exp(-1j * 2.0 * np.pi * f * (tm - tc)))
+            if not np.isfinite(z) or abs(z) <= 1e-12:
+                coeff_valid[i, k] = False
+                continue
             ang = np.angle(z)
             offset = f * (s + d / 2.0)
             # unalias to the unwrapped 2*pi*f*(tau_c - tau_true)
@@ -155,10 +214,17 @@ def phase_tdoa(
     for i in range(n_mics):
         if i == reference_mic:
             delays[i] = 0.0
-            valid[i] = True
+            valid[i] = bool(np.all(coeff_valid[i]))
+            continue
+        if not np.all(coeff_valid[i]) or not np.all(coeff_valid[reference_mic]):
+            valid[i] = False
             continue
         diff = phi[i] - ref                       # = 2*pi*f*((tau_c[i]-tau_c[ref]) - d_tau)
-        slope, intercept = np.polyfit(freqs, diff, 1)
+        try:
+            slope, intercept = np.polyfit(freqs, diff, 1)
+        except (ValueError, np.linalg.LinAlgError):
+            valid[i] = False
+            continue
         d_tau = (tau_c[i] - tau_c[reference_mic]) - slope / (2.0 * np.pi)
         delays[i] = d_tau
         # coherence check: per-tone deviation from the fitted line
@@ -187,6 +253,8 @@ def coherent_onset(
     `arrival_times` is left unchanged; this is an additive sibling used only
     when the phase-refinement path is active.
     """
+    waveforms = _validate_waveforms(waveforms)
+    _validate_segments(schedule.segments, schedule.sample_rate)
     n_mics = waveforms.shape[0]
     arrivals = np.zeros((n_mics, len(schedule.segments)))
     sr = schedule.sample_rate
@@ -204,6 +272,8 @@ def coherent_onset(
             corr = np.abs(np.correlate(waveforms[i], ref, mode="full"))
             lo = i0 + nref - 1
             hi = min(len(corr), i0 + int(max_rt * sr) + nref - 1)
+            if lo < 0 or hi <= lo:
+                raise ValueError(f"segment {j} has no samples in its detection window")
             pk = lo + int(np.argmax(corr[lo:hi]))
             onset_idx = pk - (nref - 1)
             arrivals[i, j] = onset_idx / sr - seg.start
@@ -242,8 +312,11 @@ from .schedule import Schedule
 
 def _cross_band_metric(waveforms, segments, sr, coarse, ref):
     """Maximum per-mic TDOA disagreement between lower and upper tone subsets."""
-    lo = [s for i, s in enumerate(segments) if i < 2]   # 40k, 42k
-    hi = [s for i, s in enumerate(segments) if i >= 3]  # 46k, 48k
+    if len(segments) < 4:
+        raise ValueError("cross-band validation requires at least four segments")
+    mid = len(segments) // 2
+    lo = list(segments[:mid])
+    hi = list(segments[mid:])
     d_lo, _ = phase_tdoa(waveforms, lo, sr, coarse, ref)
     d_hi, _ = phase_tdoa(waveforms, hi, sr, coarse, ref)
     return np.max(np.abs(d_lo - d_hi))
@@ -288,6 +361,8 @@ def calibrate_validator_thresholds(
         {"cross_band": 4.2e-6, "loto": 3.1e-6, "envelope": 8.0e-6,
          "geom_spread": 0.012}
     """
+    if not isinstance(n_trials, (int, np.integer)) or n_trials < 1:
+        raise ValueError("n_trials must be a positive integer")
     metrics = {"cross_band": [], "loto": [], "envelope": [], "geom_spread": []}
     sr = float(sample_rate)
     ref = reference_mic
@@ -300,11 +375,7 @@ def calibrate_validator_thresholds(
         if mics is not None:
             from .solve import solve_point
             tof_ph = coarse[ref] + d_prim
-            pts = []
-            for sub in itertools.combinations(range(len(mics)), 3):
-                pt = solve_point(tof_ph[list(sub)], mics[list(sub)], speed, beam_axis=beam_axis)
-                pts.append(pt)
-            spread = np.max([np.linalg.norm(p - np.mean(pts, axis=0)) for p in pts])
+            spread = _geometry_spread(tof_ph, mics, speed, beam_axis)
             metrics["geom_spread"].append(spread)
     # add a noise floor so the validator does not reject trials for
     # microscopically small deviations (clean calibration gives near-zero
@@ -343,6 +414,14 @@ def validate_phase_consistency(
     valid : (n_mic,)  False for ALL mics if *any* check fails.
     diagnostics : dict  the raw metric values for this trial.
     """
+    if not isinstance(thresholds, dict):
+        raise ValueError("thresholds must be a dict")
+    for key in ("cross_band", "loto", "envelope"):
+        if key not in thresholds or not np.isfinite(thresholds[key]) or thresholds[key] < 0:
+            raise ValueError(f"thresholds missing finite non-negative {key!r}")
+    if "geom_spread" in thresholds and (
+            not np.isfinite(thresholds["geom_spread"]) or thresholds["geom_spread"] < 0):
+        raise ValueError("geom_spread threshold must be finite and non-negative")
     sr = float(sample_rate)
     ref = reference_mic
     n_mic = waveforms.shape[0]
@@ -367,11 +446,7 @@ def validate_phase_consistency(
     if mics is not None and "geom_spread" in thresholds:
         from .solve import solve_point
         tof_ph = coarse_tof_per_mic[ref] + d_prim
-        pts = []
-        for sub in itertools.combinations(range(len(mics)), 3):
-            pt = solve_point(tof_ph[list(sub)], mics[list(sub)], speed, beam_axis=beam_axis)
-            pts.append(pt)
-        spread = np.max([np.linalg.norm(p - np.mean(pts, axis=0)) for p in pts])
+        spread = _geometry_spread(tof_ph, mics, speed, beam_axis)
         diag["geom_spread"] = spread
         geom_pass = spread <= thresholds.get("geom_spread", 1e9)
     else:
@@ -381,3 +456,20 @@ def validate_phase_consistency(
 
     valid_out = np.full(n_mic, diag["pass"], dtype=bool)
     return d_prim, valid_out, diag
+
+
+def _geometry_spread(tof, mics, speed, beam_axis):
+    """Return infinity when any geometry subset cannot produce a solution."""
+    from .solve import solve_point
+
+    pts = []
+    for sub in itertools.combinations(range(len(mics)), 3):
+        try:
+            pts.append(solve_point(tof[list(sub)], mics[list(sub)], speed,
+                                   beam_axis=beam_axis))
+        except (ValueError, RuntimeError, np.linalg.LinAlgError):
+            return np.inf
+    if not pts:
+        return np.inf
+    centre = np.mean(pts, axis=0)
+    return float(np.max([np.linalg.norm(p - centre) for p in pts]))

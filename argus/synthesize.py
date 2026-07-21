@@ -72,13 +72,33 @@ def synthesize(
     If *trajectory* is provided, per-tone path lengths are computed from
     the moving emitter/receiver positions (motion-acoustic coupling).
     """
+    if not np.isfinite(speed) or speed <= 0:
+        raise ValueError("speed must be finite and positive")
+    if not np.isfinite(amplitude):
+        raise ValueError("amplitude must be finite")
     if mics is None:
         mics = diamond_mics()
+    mics = np.asarray(mics, dtype=float)
+    if mics.ndim != 2 or mics.shape[1] != 3 or np.any(~np.isfinite(mics)):
+        raise ValueError("mics must have shape (n, 3) and contain finite values")
+    if trajectory is not None and trajectory.mic_local.shape[0] != mics.shape[0]:
+        raise ValueError("trajectory and microphone arrays must have the same length")
+    if reflectors is None:
+        raise ValueError("reflectors must be a sequence")
+    for refl in reflectors:
+        pos = np.asarray(refl.pos, dtype=float)
+        if pos.shape != (3,) or np.any(~np.isfinite(pos)):
+            raise ValueError("reflector positions must be finite 3-vectors")
     worst = 0.0
     for refl in reflectors:
-        for m in mics:
-            L = refl.path_lengths(ORIGIN, np.atleast_2d(m))[0]
-            worst = max(worst, L / speed)
+        if trajectory is None:
+            for m in mics:
+                L = refl.path_lengths(ORIGIN, np.atleast_2d(m))[0]
+                worst = max(worst, L / speed)
+        else:
+            for seg in schedule.segments:
+                Ls = motion_path_lengths(refl.pos, seg.start, trajectory, speed)
+                worst = max(worst, float(np.max(Ls)) / speed)
     extra = worst + 0.005
     return np.stack([
         _mic_waveform(schedule, mics[i], reflectors, speed, amplitude, extra,

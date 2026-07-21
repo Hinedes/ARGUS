@@ -24,14 +24,14 @@ def probe(
     rng=None,
 ):
     """Run one candidate schedule end to end and return observable metrics."""
-    rng = rng or np.random.default_rng(0)
+    rng = np.random.default_rng(0) if rng is None else rng
     sched = build_schedule(freqs, tone_duration, sample_rate)
     mics = diamond_mics()
     wf = synthesize(sched, reflectors, mics, speed)
     if noise:
         wf = wf + rng.normal(0, noise, wf.shape)
 
-    arr = arrival_times(wf, sched)
+    arr = arrival_times(wf, sched, speed=speed)
     tof = median_tof(arr, axis=1)
     dist = speed * tof
 

@@ -93,15 +93,36 @@ class MultipathConfig:
 
 
 def _field_points(ranges, h_angles, v_angles):
+    if not ranges or not h_angles or not v_angles:
+        raise ValueError("ranges and FOV angle grids must not be empty")
     pts = []
     for r in ranges:
         for ha in h_angles:
             for va in v_angles:
-                x = r * np.tan(ha)
-                z = r / np.cos(ha)
-                y = z * np.tan(va)
+                if r <= 0 or not np.isfinite(r):
+                    raise ValueError("ranges must be finite and positive")
+                if not np.isfinite(ha) or not np.isfinite(va):
+                    raise ValueError("FOV angles must be finite")
+                x = r * np.cos(va) * np.sin(ha)
+                y = r * np.sin(va)
+                z = r * np.cos(va) * np.cos(ha)
                 pts.append(np.array([x, y, z]))
     return pts
+
+
+def _beam_frame(axis):
+    axis = np.asarray(axis, dtype=float)
+    norm = np.linalg.norm(axis)
+    if axis.shape != (3,) or not np.isfinite(norm) or norm == 0:
+        raise ValueError("beam_axis must be a finite, non-zero 3-vector")
+    axis = axis / norm
+    horiz = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(horiz, axis)) > 0.9:
+        horiz = np.array([0.0, 1.0, 0.0])
+    horiz -= axis * np.dot(horiz, axis)
+    horiz /= np.linalg.norm(horiz)
+    vert = np.cross(axis, horiz)
+    return axis, horiz, vert
 
 
 def _draw_phase_bias(n_mic, n_freq, sigma, rng):
@@ -229,9 +250,9 @@ def _apply_mismatch_fixed(wf, sched, mics, P, drawn_params):
             amp = tone_amps[k]
 
             if ring > 0.0:
-                burst = _emitter_burst(f, seg.duration, sr, seg.start,
-                                        dly, damping=ring)
-                out[i, a:b] = burst[:d] * amp
+                burst = _emitter_burst(f, seg.duration, sr,
+                                       seg.start + dly, dly, damping=ring)
+                out[i, a:b] = burst[a:b] * amp
             else:
                 tt_burst = np.arange(a, b) / sr
                 carrier = np.cos(2.0 * np.pi * f * (tt_burst - seg.start - dly) + phi_off)
@@ -286,8 +307,8 @@ def _calibrate(coarse, phi, freqs, true_params, cal, rng=None):
     if cal is None or not cal.known:
         return coarse, phi
 
-    cal_phase = cal.known_phase
-    cal_skew = cal.known_skew
+    cal_phase = None if cal.known_phase is None else np.array(cal.known_phase, copy=True)
+    cal_skew = None if cal.known_skew is None else np.array(cal.known_skew, copy=True)
 
     # Stale calibration: add drift to the known values
     if cal.stale_drift > 0.0 and rng is not None:
@@ -316,14 +337,10 @@ def envelope_tof(waveforms, schedule, sr):
 
 
 def phase_refined_tof(waveforms, schedule, sr, freqs):
-    """Placeholder for carrier-phase timing refinement (NOT YET IMPLEMENTED).
-
-    The envelope detector already lands on the burst onset to integer-sample
-    precision (~4 us at 250 kHz). Sub-sample refinement via the residual
-    carrier phase across the burst is a planned next step -- it is NOT wired
-    into the estimator path yet, so callers should use estimator="envelope".
-    """
-    raise NotImplementedError("carrier-phase refinement not yet implemented")
+    """Return median fractional matched-filter onset estimates."""
+    if int(sr) != sr or sr <= 0:
+        raise ValueError("sr must be a positive integer")
+    return median_tof(arrival_times(waveforms, schedule, fractional=True), axis=1)
 
 
 @dataclass
@@ -345,12 +362,21 @@ class SensitivityConfig:
     seed: int = 0
     reference_mic: int = 0       # mic whose coarse ToF anchors the phase TDOA
 
+    def __post_init__(self):
+        if not isinstance(self.n_trials, (int, np.integer)) or self.n_trials < 1:
+            raise ValueError("n_trials must be a positive integer")
+        if not isinstance(self.sr, (int, np.integer)) or self.sr <= 0:
+            raise ValueError("sr must be a positive integer")
+        _beam_frame(self.beam_axis)
+        if self.reference_mic < 0:
+            raise ValueError("reference_mic must be non-negative")
+        _field_points(self.ranges, self.h_angles, self.v_angles)
+
 
 def _estimate_tof(waveforms, sched, sr, cfg):
     if cfg.refine:
-        # carrier-phase refinement is built/tested in isolation (see
-        # tests/test_phase_model.py) before being wired into this path.
-        raise NotImplementedError("carrier-phase refinement not yet wired in")
+        return phase_refined_tof(waveforms, sched, sr,
+                                 [seg.freq for seg in sched.segments])
     return envelope_tof(waveforms, sched, SPEED)
 
 
@@ -369,6 +395,7 @@ def run_monte_carlo(cfg: SensitivityConfig) -> dict:
     injecting jitter directly on the ideal estimate.
     """
     rng = np.random.default_rng(cfg.seed)
+    beam_axis = _beam_frame(cfg.beam_axis)[0]
     mics = diamond_mics(tilt=cfg.tilt, half=cfg.baseline_half)
     pts = _field_points(cfg.ranges, cfg.h_angles, cfg.v_angles)
 
@@ -391,8 +418,8 @@ def run_monte_carlo(cfg: SensitivityConfig) -> dict:
             err_vec = est - P
             errors[pi, t] = np.linalg.norm(err_vec)
             # range error = component along the boresight (z); direction = lateral
-            range_err[pi, t] = abs(err_vec[2])
-            dir_err[pi, t] = np.linalg.norm(err_vec[[0, 1]])
+            range_err[pi, t] = abs(np.dot(err_vec, beam_axis))
+            dir_err[pi, t] = np.linalg.norm(err_vec - np.dot(err_vec, beam_axis) * beam_axis)
     return {
         "points": np.array(pts),
         "errors": errors,
@@ -443,6 +470,7 @@ def run_waveform_chain(cfg: "SensitivityConfig",
     can cut by range / angle / SNR / baseline / ADC rate independently.
     """
     rng = np.random.default_rng(cfg.seed)
+    beam_axis, horiz_axis, vert_axis = _beam_frame(cfg.beam_axis)
     mics = diamond_mics(tilt=cfg.tilt, half=cfg.baseline_half)
     pts = _field_points(cfg.ranges, cfg.h_angles, cfg.v_angles)
     ref = cfg.reference_mic
@@ -523,9 +551,18 @@ def run_waveform_chain(cfg: "SensitivityConfig",
             tof_phase = coarse[ref] + delays        # anchor range on coarse[ref]
             tof_fb = tof_phase if np.all(valid) else coarse.copy()
 
-            est_env = solve_point(tof_env, mics, SPEED, beam_axis=cfg.beam_axis)
-            est_phase = solve_point(tof_phase, mics, SPEED, beam_axis=cfg.beam_axis)
-            est_fb = solve_point(tof_fb, mics, SPEED, beam_axis=cfg.beam_axis)
+            try:
+                est_env = solve_point(tof_env, mics, SPEED, beam_axis=cfg.beam_axis)
+                est_phase = solve_point(tof_phase, mics, SPEED, beam_axis=cfg.beam_axis)
+                est_fb = solve_point(tof_fb, mics, SPEED, beam_axis=cfg.beam_axis)
+            except (ValueError, RuntimeError, np.linalg.LinAlgError):
+                # A rejected geometry is a rejected trial, not a process crash.
+                for array in (err_env, err_phase, err_fallback, err_range,
+                              err_horiz, err_vert, err_env_range,
+                              err_env_horiz, err_fb_range, err_fb_horiz,
+                              ref_range_err, tdoa_err_vec):
+                    array[pi, t] = np.nan
+                continue
 
             d_env = est_env - P
             d_ph  = est_phase - P
@@ -534,8 +571,10 @@ def run_waveform_chain(cfg: "SensitivityConfig",
             ph_n    = np.linalg.norm(d_ph)
             fb_n    = np.linalg.norm(d_fb)
             env_r   = abs(d_env[2]); env_h = abs(d_env[0])
-            ph_r    = abs(d_ph[2]);  ph_h = abs(d_ph[0]);  ph_v = abs(d_ph[1])
-            fb_r    = abs(d_fb[2]);  fb_h = abs(d_fb[0])
+            ph_r    = abs(np.dot(d_ph, beam_axis))
+            ph_h    = abs(np.dot(d_ph, horiz_axis))
+            ph_v    = abs(np.dot(d_ph, vert_axis))
+            fb_r    = abs(np.dot(d_fb, beam_axis)); fb_h = abs(np.dot(d_fb, horiz_axis))
 
             err_env[pi, t]         = env_n
             err_phase[pi, t]       = ph_n
@@ -553,6 +592,7 @@ def run_waveform_chain(cfg: "SensitivityConfig",
             tdoa_err_vec[pi, t]    = delays - true_tdoa
 
     def _sum(a):
+        a = a[np.isfinite(a)]
         if a.size == 0:
             return {"median": float("nan"), "p95": float("nan"), "mean": float("nan")}
         return {

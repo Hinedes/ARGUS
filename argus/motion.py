@@ -12,7 +12,12 @@ import numpy as np
 def _rotation_matrix(axis, angle):
     """Rodrigues' rotation formula."""
     axis = np.asarray(axis, dtype=float)
-    axis = axis / np.linalg.norm(axis)
+    norm = np.linalg.norm(axis)
+    if axis.shape != (3,) or not np.isfinite(norm) or norm == 0:
+        raise ValueError("rotation axis must be a finite, non-zero 3-vector")
+    if not np.isfinite(angle):
+        raise ValueError("rotation angle must be finite")
+    axis = axis / norm
     c, s = np.cos(angle), np.sin(angle)
     K = np.array([[0, -axis[2], axis[1]],
                   [axis[2], 0, -axis[0]],
@@ -30,8 +35,15 @@ class Trajectory:
 
     def __init__(self, mic_local, beam_axis_world=None):
         self.mic_local = np.asarray(mic_local, dtype=float)
-        self.beam_axis_world = (np.array([0.0, 0.0, 1.0]) if beam_axis_world is None
-                                else np.asarray(beam_axis_world, dtype=float))
+        if (self.mic_local.ndim != 2 or self.mic_local.shape[1] != 3 or
+                len(self.mic_local) == 0 or np.any(~np.isfinite(self.mic_local))):
+            raise ValueError("mic_local must have shape (n, 3) and be finite")
+        axis = (np.array([0.0, 0.0, 1.0]) if beam_axis_world is None
+                else np.asarray(beam_axis_world, dtype=float))
+        norm = np.linalg.norm(axis)
+        if axis.shape != (3,) or not np.isfinite(norm) or norm == 0:
+            raise ValueError("beam_axis_world must be a finite, non-zero 3-vector")
+        self.beam_axis_world = axis / norm
 
     def emitter_pos(self, t: float) -> np.ndarray:
         raise NotImplementedError
@@ -46,7 +58,7 @@ class Trajectory:
 
     def beam_axis(self, t: float) -> np.ndarray:
         """Gimbal-stabilized beam axis in world frame (constant by default)."""
-        return self.beam_axis_world
+        return self.beam_axis_world.copy()
 
 
 class ConstantVelocity(Trajectory):
@@ -64,8 +76,17 @@ class ConstantVelocity(Trajectory):
         self.p0 = np.asarray(p0, dtype=float)
         self.v = np.asarray(v, dtype=float)
         self.omega = np.asarray(omega, dtype=float)
+        if any(x.shape != (3,) or np.any(~np.isfinite(x))
+               for x in (self.p0, self.v, self.omega)):
+            raise ValueError("p0, v, and omega must be finite 3-vectors")
         self.body_orientation0 = (np.eye(3) if body_orientation0 is None
                                   else np.asarray(body_orientation0, dtype=float))
+        if (self.body_orientation0.shape != (3, 3) or
+                np.any(~np.isfinite(self.body_orientation0)) or
+                not np.allclose(self.body_orientation0.T @ self.body_orientation0,
+                                np.eye(3), atol=1e-7) or
+                not np.isclose(np.linalg.det(self.body_orientation0), 1.0, atol=1e-7)):
+            raise ValueError("body_orientation0 must be a proper rotation matrix")
 
     def emitter_pos(self, t: float) -> np.ndarray:
         return self.p0 + self.v * t
@@ -169,12 +190,21 @@ def _quat_multiply(q1, q2):
     ])
 
 
+def _normalize_quaternion(q):
+    q = np.asarray(q, dtype=float)
+    norm = np.linalg.norm(q)
+    if q.shape != (4,) or not np.isfinite(norm) or norm == 0:
+        raise ValueError("quaternion must be a finite, non-zero 4-vector")
+    return q / norm
+
+
 def _quat_conjugate(q):
     return np.array([q[0], -q[1], -q[2], -q[3]])
 
 
 def _quat_to_rotmat(q):
     """Convert (w,x,y,z) quaternion to 3×3 rotation matrix."""
+    q = _normalize_quaternion(q)
     w, x, y, z = q
     return np.array([
         [1 - 2*y*y - 2*z*z,   2*x*y - 2*w*z,     2*x*z + 2*w*y],
@@ -188,17 +218,21 @@ def _slerp(q0, q1, t):
 
     Returns the quaternion at fraction *t* ∈ [0, 1] along the shortest path.
     """
-    dot = q0[0]*q1[0] + q0[1]*q1[1] + q0[2]*q1[2] + q0[3]*q1[3]
+    if not np.isfinite(t):
+        raise ValueError("SLERP fraction must be finite")
+    q0 = _normalize_quaternion(q0)
+    q1 = _normalize_quaternion(q1)
+    dot = np.dot(q0, q1)
     if dot < 0:
         q1 = -q1
         dot = -dot
     if dot > 0.9995:
-        return q0 + t * (q1 - q0)
+        return _normalize_quaternion(q0 + t * (q1 - q0))
     theta = np.arccos(np.clip(dot, -1, 1))
     sin_th = np.sin(theta)
     a = np.sin((1 - t) * theta) / sin_th
     b = np.sin(t * theta) / sin_th
-    return a * q0 + b * q1
+    return _normalize_quaternion(a * q0 + b * q1)
 
 
 def _linear_interp(t, t_grid, y_grid):
@@ -237,6 +271,7 @@ _TOL_OMEGA_TRANSFORM = 1e-8
 _TOL_GIMBAL_QUAT_DEG = 1.0       # degrees
 _TOL_BEAM_AXIS_DEG = 0.5
 _TOL_POSITION_MM = 1.0
+_TOL_AXIS_NORM = 0.01
 
 
 def _parse_metadata(meta_str):
@@ -245,10 +280,10 @@ def _parse_metadata(meta_str):
         meta_str = meta_str.decode("utf-8")
     if isinstance(meta_str, np.ndarray) and meta_str.ndim == 0:
         meta_str = str(meta_str)
-    if isinstance(meta_str, str):
-        meta = json.loads(meta_str)
-    else:
-        meta = dict(meta_str)
+    try:
+        meta = json.loads(meta_str) if isinstance(meta_str, str) else dict(meta_str)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"metadata_json is not valid JSON/object data: {exc}") from exc
     for k, expected in _REQUIRED_METADATA.items():
         if k not in meta:
             raise ValueError(f"metadata missing required key {k!r}")
@@ -258,6 +293,14 @@ def _parse_metadata(meta_str):
         if isinstance(expected, int) and meta[k] != expected:
             raise ValueError(
                 f"metadata {k}={meta[k]}, expected {expected}")
+    if "physical_emitter_offset_body_m" not in meta:
+        raise ValueError("metadata missing required key 'physical_emitter_offset_body_m'")
+    offset = np.asarray(meta["physical_emitter_offset_body_m"], dtype=float)
+    if offset.shape != (3,) or not np.allclose(offset, ECHOS_EMITTER_OFFSET, atol=1e-9):
+        raise ValueError("metadata physical_emitter_offset_body_m does not match Echos")
+    for key in ("physics_dt_s", "control_dt_s"):
+        if (not np.isfinite(meta[key]) or meta[key] <= 0):
+            raise ValueError(f"metadata {key} must be finite and positive")
     return meta
 
 
@@ -309,15 +352,27 @@ class SampledTrajectory(Trajectory):
             raise ValueError("t_s contains non-finite values")
         self._t = t
 
-        # --- shape + finite (all float arrays) ------------------------------
-        _float_keys = [k for k in data if isinstance(data[k], np.ndarray)
-                       and data[k].dtype.kind in "fc"]
-        for k in _float_keys:
+        # --- shape + finite --------------------------------------------------
+        field_shapes = {
+            "body_pos_world_m": (len(t), 3),
+            "body_quat_world_wxyz": (len(t), 4),
+            "body_vel_world_mps": (len(t), 3),
+            "body_omega_body_rps": (len(t), 3),
+            "body_omega_world_rps": (len(t), 3),
+            "gimbal_pitch_rad": (len(t),),
+            "gimbal_quat_body_wxyz": (len(t), 4),
+            "gimbal_quat_world_wxyz": (len(t), 4),
+            "beam_axis_world": (len(t), 3),
+            "emitter_pos_world_m": (len(t), 3),
+            "mic_pos_world_m": (len(t), 4, 3),
+        }
+        for k, shape in field_shapes.items():
+            if k not in data:
+                continue
             arr = np.asarray(data[k], dtype=float)
-            if arr.ndim > 0 and arr.shape[0] != len(t):
-                raise ValueError(
-                    f"{k} first dim {arr.shape[0]} != t_s len {len(t)}")
-            if not np.all(np.isfinite(arr)):
+            if arr.shape != shape:
+                raise ValueError(f"{k} must have shape {shape}, got {arr.shape}")
+            if np.any(~np.isfinite(arr)):
                 raise ValueError(f"{k} contains non-finite values")
 
         # --- quaternion norm checks -----------------------------------------
@@ -362,6 +417,24 @@ class SampledTrajectory(Trajectory):
         self._beam_axis_gimbal = (np.array([1.0, 0.0, 0.0])
                                   if beam_axis_gimbal is None
                                   else np.asarray(beam_axis_gimbal, dtype=float))
+        beam_gimbal_norm = np.linalg.norm(self._beam_axis_gimbal)
+        if (self._beam_axis_gimbal.shape != (3,) or
+                not np.isfinite(beam_gimbal_norm) or beam_gimbal_norm == 0):
+            raise ValueError("beam_axis_gimbal must be a finite, non-zero 3-vector")
+        self._beam_axis_gimbal /= beam_gimbal_norm
+
+        self._q_body = self._q_body / np.linalg.norm(self._q_body, axis=1)[:, None]
+        self._q_gimbal_body = self._q_gimbal_body / np.linalg.norm(
+            self._q_gimbal_body, axis=1)[:, None]
+        if self._q_gimbal_world is not None:
+            self._q_gimbal_world /= np.linalg.norm(self._q_gimbal_world, axis=1)[:, None]
+        if self._beam is not None:
+            beam_norm = np.linalg.norm(self._beam, axis=1)
+            if np.any(beam_norm == 0):
+                raise ValueError("beam_axis_world contains a zero vector")
+            if strict_contract and np.max(np.abs(beam_norm - 1.0)) > _TOL_AXIS_NORM:
+                raise ValueError("beam_axis_world is not normalized")
+            self._beam = self._beam / beam_norm[:, None]
 
     # -- Trajectory interface ------------------------------------------------
 
@@ -389,7 +462,11 @@ class SampledTrajectory(Trajectory):
         return _quat_to_rotmat(q)
 
     def beam_axis(self, t: float) -> np.ndarray:
-        return _linear_interp(t, self._t, self._beam)
+        if self._beam is None:
+            axis = self.body_rot(t) @ self._beam_axis_gimbal
+        else:
+            axis = _linear_interp(t, self._t, self._beam)
+        return axis / np.linalg.norm(axis)
 
     # -- Transform cross-validation ------------------------------------------
 
@@ -413,25 +490,27 @@ class SampledTrajectory(Trajectory):
             results["omega_transform"] = max_om
 
         # 2. gimbal world quaternion from composition
-        max_gq = 0.0
-        for i in range(n):
-            q_world = _quat_multiply(self._q_body[i], self._q_gimbal_body[i])
-            # handle q / -q equivalence
-            dot = abs(np.dot(q_world, self._q_gimbal_world[i]))
-            angle = np.rad2deg(2 * np.arccos(np.clip(dot, -1, 1)))
-            max_gq = max(max_gq, angle)
-        results["gimbal_quat_composition_deg"] = max_gq
+        if self._q_gimbal_world is not None:
+            max_gq = 0.0
+            for i in range(n):
+                q_world = _quat_multiply(self._q_body[i], self._q_gimbal_body[i])
+                # handle q / -q equivalence
+                dot = abs(np.dot(q_world, self._q_gimbal_world[i]))
+                angle = np.rad2deg(2 * np.arccos(np.clip(dot, -1, 1)))
+                max_gq = max(max_gq, angle)
+            results["gimbal_quat_composition_deg"] = max_gq
 
         # 3. beam axis from quaternion
-        max_ba = 0.0
-        for i in range(n):
-            R = _quat_to_rotmat(self._q_body[i])
-            Rg = _quat_to_rotmat(self._q_gimbal_body[i])
-            derived_world = R @ Rg @ self._beam_axis_gimbal
-            err = np.rad2deg(np.arccos(np.clip(
-                np.dot(derived_world, self._beam[i]), -1, 1)))
-            max_ba = max(max_ba, err)
-        results["beam_axis_deg"] = max_ba
+        if self._beam is not None:
+            max_ba = 0.0
+            for i in range(n):
+                R = _quat_to_rotmat(self._q_body[i])
+                Rg = _quat_to_rotmat(self._q_gimbal_body[i])
+                derived_world = R @ Rg @ self._beam_axis_gimbal
+                err = np.rad2deg(np.arccos(np.clip(
+                    np.dot(derived_world, self._beam[i]), -1, 1)))
+                max_ba = max(max_ba, err)
+            results["beam_axis_deg"] = max_ba
 
         # 4. emitter position from body
         if self._emitter_pos_export is not None:
@@ -461,10 +540,11 @@ class SampledTrajectory(Trajectory):
         dur = self._t[-1] - self._t[0]
         dts = np.diff(self._t)
         pos_bounds = [float(self._pos.min()), float(self._pos.max())]
-        speeds = np.linalg.norm(self._vel, axis=1)
+        speeds = np.linalg.norm(self._vel, axis=1) if self._vel is not None else None
         omega_norms = np.linalg.norm(self._omega_body, axis=1) if self._omega_body is not None else None
         q_norms = np.linalg.norm(self._q_body, axis=1)
-        beam_norms = np.linalg.norm(self._beam, axis=1)
+        beam_norms = (np.linalg.norm(self._beam, axis=1)
+                      if self._beam is not None else None)
         gimbal_pitch_max = float(np.max(np.abs(self._gimbal_pitch))) if self._gimbal_pitch is not None else None
 
         body_pitch = []
@@ -472,7 +552,7 @@ class SampledTrajectory(Trajectory):
             R = _quat_to_rotmat(self._q_body[i])
             # pitch = asin(-R[2,0]) for Z-up body frame
             body_pitch.append(np.rad2deg(np.arcsin(np.clip(-R[2, 0], -1, 1))))
-        max_body_pitch = max(body_pitch)
+        max_body_pitch = max(abs(p) for p in body_pitch)
 
         transforms = self.validate_transforms()
         return {
@@ -483,12 +563,13 @@ class SampledTrajectory(Trajectory):
             "dt_median_s": float(np.median(dts)),
             "dt_max_s": float(np.max(dts)),
             "pos_bounds_m": pos_bounds,
-            "max_speed_mps": float(np.max(speeds)),
+            "max_speed_mps": float(np.max(speeds)) if speeds is not None else None,
             "max_omega_body_rps": float(np.max(omega_norms)) if omega_norms is not None else None,
             "max_body_pitch_deg": max_body_pitch,
             "max_gimbal_pitch_deg": gimbal_pitch_max,
             "q_body_norm_range": [float(np.min(q_norms)), float(np.max(q_norms))],
-            "beam_axis_norm_range": [float(np.min(beam_norms)), float(np.max(beam_norms))],
+            "beam_axis_norm_range": ([float(np.min(beam_norms)), float(np.max(beam_norms))]
+                                      if beam_norms is not None else None),
             **{f"xval_{k}": v for k, v in transforms.items()},
         }
 
@@ -531,6 +612,11 @@ def path_lengths(P_ref, t_emit, traj, c=343.0):
 
     Uses fixed-point iteration to solve the implicit delay equation.
     """
+    P_ref = np.asarray(P_ref, dtype=float)
+    if P_ref.shape != (3,) or np.any(~np.isfinite(P_ref)):
+        raise ValueError("P_ref must be a finite 3-vector")
+    if not np.isfinite(t_emit) or not np.isfinite(c) or c <= 0:
+        raise ValueError("t_emit must be finite and c must be positive")
     n = traj.mic_local.shape[0]
     Ls = np.zeros(n)
     for i in range(n):
