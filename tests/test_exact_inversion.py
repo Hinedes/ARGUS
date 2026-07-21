@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from argus.acoustic_scene import diamond_mics, ORIGIN
-from argus.solve import solve_point, _residual
+from argus.solve import solve_point, tof_to_distance, _residual
 
 
 MICS = diamond_mics()
@@ -36,7 +36,7 @@ def test_exact_tof_inverts_exactly(pos):
 def test_residual_zero_at_true_point():
     pos = np.array([0.3, -0.2, 2.0])
     tof = (np.linalg.norm(pos) + np.linalg.norm(MICS - pos, axis=1)) / SPEED
-    res, _ = _residual(pos, MICS, ORIGIN, SPEED * tof)
+    res, _ = _residual(pos, MICS, ORIGIN, tof_to_distance(tof, SPEED))
     assert np.allclose(res, 0.0, atol=1e-9)
 
 
@@ -44,7 +44,7 @@ def test_residual_zero_at_true_point():
 def test_jacobian_well_conditioned(pos):
     """Ill-conditioned != singular: rank 3, finite condition number."""
     tof = (np.linalg.norm(pos) + np.linalg.norm(MICS - pos, axis=1)) / SPEED
-    _, J = _residual(pos, MICS, ORIGIN, SPEED * tof)
+    _, J = _residual(pos, MICS, ORIGIN, tof_to_distance(tof, SPEED))
     sv = np.linalg.svd(J, compute_uv=False)
     assert np.linalg.matrix_rank(J, tol=1e-6) == 3
     assert sv.max() / sv.min() < 1e3

@@ -72,8 +72,8 @@ def test_adc_rate_is_raw_grid_not_hard_floor():
     """A coarser ADC rate worsens envelope-only error -- the sample interval is
     a raw timing grid. Achievable precision below one sample is a separate
     question (see fractional refinement), not asserted here."""
-    fine = S.run_monte_carlo(_cfg(sr=250_000, n_trials=12, seed=6))["overall_p95"]
-    coarse = S.run_monte_carlo(_cfg(sr=62_500, n_trials=12, seed=6))["overall_p95"]
+    fine = S.run_monte_carlo(_cfg(refine=False, sr=250_000, n_trials=12, seed=6))["overall_p95"]
+    coarse = S.run_monte_carlo(_cfg(refine=False, sr=62_500, n_trials=12, seed=6))["overall_p95"]
     assert coarse > fine
 
 

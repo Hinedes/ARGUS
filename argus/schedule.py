@@ -30,6 +30,11 @@ class Schedule:
     def duration(self) -> float:
         return sum(s.duration for s in self.segments) + self.guard * (len(self.segments) - 1)
 
+    def emission_times(self) -> list[float]:
+        """Emission start time of each segment (Method C shares one clock)."""
+        return [s.start for s in self.segments]
+
+
 def build_schedule(
     freqs: Sequence[float],
     tone_duration: float,

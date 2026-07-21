@@ -11,11 +11,15 @@ import numpy as np
 from .acoustic_scene import ORIGIN, diamond_mics
 
 
-def _residual(P, mics, ORIGIN, d):
-    rO = np.linalg.norm(P - ORIGIN)
+def tof_to_distance(tof: np.ndarray, speed: float = 343.0) -> np.ndarray:
+    return speed * tof
+
+
+def _residual(P, mics, origin, d):
+    rO = np.linalg.norm(P - origin)
     res = np.zeros(mics.shape[0])
     J = np.zeros((mics.shape[0], 3))
-    gO = (P - ORIGIN) / (rO + 1e-12)
+    gO = (P - origin) / (rO + 1e-12)
     for i, M in enumerate(mics):
         rM = np.linalg.norm(P - M)
         res[i] = rO + rM - d[i]
@@ -28,7 +32,9 @@ def solve_point(
     tof: np.ndarray,
     mics: np.ndarray | None = None,
     speed: float = 343.0,
+    origin: np.ndarray | None = None,
     beam_axis: np.ndarray | None = None,
+    cone_halfangle: float = np.pi / 2.0,
 ) -> np.ndarray:
     """Least-squares estimate of reflector position from per-mic ToF.
 
@@ -43,18 +49,20 @@ def solve_point(
     """
     if mics is None:
         mics = diamond_mics()
+    if origin is None:
+        origin = ORIGIN
     if beam_axis is None:
         beam_axis = np.array([0.0, 0.0, 1.0])
     beam_axis = beam_axis / np.linalg.norm(beam_axis)
 
-    d = speed * tof
+    d = tof_to_distance(tof, speed)
     R = np.median(d) / 2.0  # coarse range from median absolute ToF
 
     # start points: on the beam axis, plus small lateral offsets
-    starts = [ORIGIN + beam_axis * R]
+    starts = [origin + beam_axis * R]
     for s in [(0.1, 0.1), (-0.1, 0.1), (0.1, -0.1), (-0.1, -0.1)]:
         lateral = np.array([s[0], s[1], 0.0])
-        starts.append(ORIGIN + beam_axis * R + lateral)
+        starts.append(origin + beam_axis * R + lateral)
 
     best = None
     best_cost = np.inf
@@ -62,12 +70,12 @@ def solve_point(
         P = P0.copy()
         lam = 1e-3
         for _ in range(100):
-            res, J = _residual(P, mics, ORIGIN, d)
+            res, J = _residual(P, mics, origin, d)
             cost = float(res @ res)
             A = J.T @ J + lam * np.eye(3)
             step = np.linalg.solve(A, J.T @ -res)
             Pn = P + step
-            resn, _ = _residual(Pn, mics, ORIGIN, d)
+            resn, _ = _residual(Pn, mics, origin, d)
             if resn @ resn < cost:
                 P = Pn
                 lam = max(lam * 0.7, 1e-9)
@@ -75,15 +83,15 @@ def solve_point(
                     break
             else:
                 lam = min(lam * 2.0, 1e6)
-        res, _ = _residual(P, mics, ORIGIN, d)
+        res, _ = _residual(P, mics, origin, d)
         cost = float(res @ res)
         # reject mirror solutions outside the known forward beam cone
-        if np.dot(P - ORIGIN, beam_axis) <= 0:
+        if np.dot(P - origin, beam_axis) <= 0:
             continue
         ang = np.arccos(
-            np.clip(np.dot((P - ORIGIN) / (np.linalg.norm(P - ORIGIN) + 1e-12),
+            np.clip(np.dot((P - origin) / (np.linalg.norm(P - origin) + 1e-12),
                             beam_axis), -1.0, 1.0))
-        if ang > np.pi / 2.0:
+        if ang > cone_halfangle:
             continue
         if cost < best_cost:
             best_cost = cost

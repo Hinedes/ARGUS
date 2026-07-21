@@ -9,6 +9,8 @@ boresight, so that signed vertical direction is recoverable from TDOA.
 from dataclasses import dataclass
 import numpy as np
 
+from .motion import ECHOS_MIC_OFFSETS
+
 # Emitter / gimbal origin.
 ORIGIN = np.zeros(3)
 
@@ -39,6 +41,17 @@ def diamond_mics(tilt: float = DIAMOND_TILT, half: float = DIAMOND_HALF) -> np.n
     return flat @ rot.T
 
 
+def echos_mics() -> np.ndarray:
+    """Return 4x3 microphone positions for the Echos physical array (body frame).
+
+    Front:  +X 78.5 mm, +Z 21.5 mm
+    Rear:   -X 78.5 mm, -Z 21.5 mm
+    Left:   +Y 78.5 mm
+    Right:  -Y 78.5 mm
+    """
+    return ECHOS_MIC_OFFSETS.copy()
+
+
 @dataclass
 class Reflector:
     pos: np.ndarray  # 3D world point
@@ -50,4 +63,11 @@ class Reflector:
         return to_r + r_to_mic
 
 
+def propagation_delay(lengths: np.ndarray, speed: float = 343.0) -> np.ndarray:
+    """One-way time for each mic from emission to arrival (seconds)."""
+    return lengths / speed
 
+
+def tdoa_references(delays: np.ndarray, ref: int = 0) -> np.ndarray:
+    """TDOA of each mic relative to reference mic (seconds)."""
+    return delays - delays[ref]
