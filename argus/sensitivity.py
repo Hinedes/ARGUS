@@ -309,23 +309,6 @@ def _calibrate(coarse, phi, freqs, true_params, cal, rng=None):
     return coarse, phi
 
 
-def envelope_tof(waveforms, schedule, sr):
-    """Matched-filter onset (envelope peak, integer-sample precise)."""
-    arr = arrival_times(waveforms, schedule)
-    return median_tof(arr, axis=1)
-
-
-def phase_refined_tof(waveforms, schedule, sr, freqs):
-    """Placeholder for carrier-phase timing refinement (NOT YET IMPLEMENTED).
-
-    The envelope detector already lands on the burst onset to integer-sample
-    precision (~4 us at 250 kHz). Sub-sample refinement via the residual
-    carrier phase across the burst is a planned next step -- it is NOT wired
-    into the estimator path yet, so callers should use estimator="envelope".
-    """
-    raise NotImplementedError("carrier-phase refinement not yet implemented")
-
-
 @dataclass
 class SensitivityConfig:
     ranges: list[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])
@@ -339,19 +322,10 @@ class SensitivityConfig:
     tilt: float = np.deg2rad(12.0)
     beam_axis: np.ndarray = field(default_factory=lambda: BEAM_AXIS.copy())
     n_trials: int = 30
-    refine: bool = False         # fractional-delay refinement (envelope -> sub-sample)
     waveform_noise: float = 0.0  # if >0, inject broadband noise on the
                                     # raw waveform and let detect.py measure ToF
     seed: int = 0
     reference_mic: int = 0       # mic whose coarse ToF anchors the phase TDOA
-
-
-def _estimate_tof(waveforms, sched, sr, cfg):
-    if cfg.refine:
-        # carrier-phase refinement is built/tested in isolation (see
-        # tests/test_phase_model.py) before being wired into this path.
-        raise NotImplementedError("carrier-phase refinement not yet wired in")
-    return envelope_tof(waveforms, sched, SPEED)
 
 
 def _true_tof(P, mics):
@@ -382,7 +356,9 @@ def run_monte_carlo(cfg: SensitivityConfig) -> dict:
             wf = synthesize(sched, [Reflector(P)], mics, SPEED)
             if cfg.waveform_noise > 0.0:
                 wf = wf + rng.normal(0.0, cfg.waveform_noise, wf.shape)
-            tof = _estimate_tof(wf, sched, cfg.sr, cfg)
+            from argus.detect import arrival_times, median_tof
+            arr = arrival_times(wf, sched)
+            tof = median_tof(arr, axis=1)
             # common-mode: same offset on every mic; differential: independent
             common = rng.normal(0.0, cfg.common_sigma)
             diff = rng.normal(0.0, cfg.diff_sigma, tof.shape)

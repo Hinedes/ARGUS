@@ -26,17 +26,6 @@ def _matched_env(sig: np.ndarray, freq: float, sr: float, tone: float) -> np.nda
     return np.abs(corr)
 
 
-def _energy(sig: np.ndarray, win: int) -> np.ndarray:
-    """Short-time energy: moving average of the squared signal. For a rectangular
-    tone burst this is a clean step (high inside, ~0 outside), so the rising
-    edge marks the true burst onset. (The Hilbert envelope of a tone ripples at
-    2f and is useless for edge detection -- energy is not.)"""
-    sq = sig * sig
-    if win < 1:
-        win = 1
-    k = np.ones(win) / win
-    return np.convolve(sq, k, mode="same")
-
 
 def arrival_times(
     waveforms: np.ndarray,
@@ -208,26 +197,6 @@ def coherent_onset(
             onset_idx = pk - (nref - 1)
             arrivals[i, j] = onset_idx / sr - seg.start
     return arrivals
-
-"""Second-stage phase-consistency validator.
-
-Keeps ``phase_tdoa`` unchanged.  Runs four independent checks on the
-demodulated phases using evidence the primary fit does not use:
-
-1. *Cross-band agreement* — lower vs upper tone subsets must give the same TDOA.
-2. *Leave-one-tone-out (LOTO) stability* — removing any one tone must not
-   change the recovered slope significantly.
-3. *Microphone-subset geometry* — 3-of-4 reconstructions must cluster
-   (requires ``mics`` argument).
-4. *Envelope compatibility* — phase-refined differential delays must stay
-   within a physically plausible interval around the coarse envelope TDOA.
-
-Thresholds are derived from a clean/calibrated single-reflector scene and
-then frozen for evaluation on held-out multipath data.
-
-Any single check failure → reject the *entire* phase solution
-(``valid = False`` for all microphones and fall back to envelope).
-"""
 
 import itertools
 
