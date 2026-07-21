@@ -80,14 +80,10 @@ def test_adc_rate_is_raw_grid_not_hard_floor():
 
 
 def test_fractional_refinement_reduces_tof_error():
-    """Fractional-delay (carrier-phase) refinement is built and proven in
-    isolation in tests/test_phase_model.py, NOT wired into this estimator path
-    yet. This test is a placeholder marker so the requirement is not forgotten;
-    the real gate lives in that isolated test."""
-    pytest.skip(
-        "carrier-phase refinement proven in tests/test_phase_model.py; "
-        "not yet wired into the sensitivity estimator path"
-    )
+    """Fractional matched-filter timing beats the coarse ADC-rate path."""
+    result = S.estimator_compare(
+        ranges=(2.0,), h_angles=[0.0], v_angles=[0.0], n_trials=1)
+    assert result["refined_fine_sr"] <= result["envelope_coarse_sr"]
 
 
 def test_waveform_driven_chain_runs():
