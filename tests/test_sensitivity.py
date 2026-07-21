@@ -58,7 +58,9 @@ def test_common_mode_hits_range_not_direction():
     # differential jitter hurts direction far more than common-mode of same sigma
     assert df["overall_dir_p95"] > cm["overall_dir_p95"]
     # but common-mode still moves range
-    assert cm["overall_range_p95"] > 0.01
+    # 20 us is 6.86 mm at the configured sound speed; range is now measured
+    # along the normalized beam axis rather than the old fixed world Z axis.
+    assert cm["overall_range_p95"] > 0.005
 
 
 def test_differential_hits_direction():
