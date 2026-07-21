@@ -1,0 +1,20 @@
+name: ARGUS audit snapshot
+
+on:
+  push:
+    branches: ["fix/argus-audit-v2"]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tar --exclude=.git -czf argus-current.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argus-current
+          path: argus-current.tar.gz
+          retention-days: 1
