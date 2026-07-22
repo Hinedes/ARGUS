@@ -545,7 +545,8 @@ class SampledTrajectory(Trajectory):
         q_norms = np.linalg.norm(self._q_body, axis=1)
         beam_norms = (np.linalg.norm(self._beam, axis=1)
                       if self._beam is not None else None)
-        gimbal_pitch_max = float(np.max(np.abs(self._gimbal_pitch))) if self._gimbal_pitch is not None else None
+        gimbal_pitch_max = (float(np.rad2deg(np.max(np.abs(self._gimbal_pitch))))
+                            if self._gimbal_pitch is not None else None)
 
         body_pitch = []
         for i in range(len(self._t)):

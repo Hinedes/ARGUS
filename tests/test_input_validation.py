@@ -150,3 +150,10 @@ def test_validate_cli_enforces_transform_tolerance():
 def test_fov_points_are_at_requested_line_of_sight_range():
     point = _field_points([2.0], [np.deg2rad(20)], [np.deg2rad(-10)])[0]
     assert np.linalg.norm(point) == pytest.approx(2.0)
+
+
+def test_contract_report_gimbal_pitch_is_in_degrees():
+    data = _trajectory_data()
+    data["gimbal_pitch_rad"][:] = np.deg2rad(15.0)
+    report = SampledTrajectory(data).contract_report()
+    assert report["max_gimbal_pitch_deg"] == pytest.approx(15.0)
